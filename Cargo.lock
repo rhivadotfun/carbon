@@ -2580,6 +2580,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbon-rhiva-zap-decoder"
+version = "1.0.0"
+dependencies = [
+ "borsh",
+ "carbon-core",
+ "carbon-test-utils",
+ "serde",
+ "solana-account 4.3.1",
+ "solana-instruction",
+ "solana-pubkey 4.2.0",
+]
+
+[[package]]
 name = "carbon-rpc-block-crawler-datasource"
 version = "1.0.0"
 dependencies = [
