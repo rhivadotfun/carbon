@@ -26,8 +26,8 @@ pub mod user_lp_position;
 pub enum HeavenAccount {
     LiquidityPoolState(Box<liquidity_pool_state::LiquidityPoolState>),
     MsolTicketSolSpent(Box<msol_ticket_sol_spent::MsolTicketSolSpent>),
-    ProtocolAdminState(Box<protocol_admin_state::ProtocolAdminState>),
     ProtocolConfig(Box<protocol_config::ProtocolConfig>),
+    ProtocolAdminState(Box<protocol_admin_state::ProtocolAdminState>),
     ProtocolOwnerState(Box<protocol_owner_state::ProtocolOwnerState>),
     UserLpPosition(Box<user_lp_position::UserLpPosition>),
 }

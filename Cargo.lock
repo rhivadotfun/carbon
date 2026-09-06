@@ -2983,6 +2983,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbon-zap-decoder"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "borsh",
+ "carbon-core",
+ "carbon-test-utils",
+ "clickhouse",
+ "juniper",
+ "serde",
+ "serde_json",
+ "solana-account",
+ "solana-instruction",
+ "solana-pubkey 3.0.0",
+ "sqlx",
+ "sqlx_migrator",
+]
+
+[[package]]
 name = "carbon-zeta-decoder"
 version = "1.0.0"
 dependencies = [
