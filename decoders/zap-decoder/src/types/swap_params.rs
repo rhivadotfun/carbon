@@ -5,4 +5,5 @@ use crate::types::FeeConfig;
 pub struct SwapParams {
     pub data: Vec<u8>,
     pub fee_config: Option<FeeConfig>,
+    pub protocol_fee: Option<u16>,
 }

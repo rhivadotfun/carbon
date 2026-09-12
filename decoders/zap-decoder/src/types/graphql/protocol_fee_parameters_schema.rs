@@ -4,17 +4,13 @@ use {carbon_core::graphql::primitives::Pubkey, juniper::GraphQLObject};
 #[derive(Debug, Clone, GraphQLObject)]
 #[graphql(name = "ProtocolFeeParameters")]
 pub struct ProtocolFeeParametersGraphQL {
-    pub fee_bps: Option<i32>,
-    pub protocol_vault: Option<Pubkey>,
+    pub protocol_vault: Pubkey,
 }
 
 impl From<crate::types::ProtocolFeeParameters> for ProtocolFeeParametersGraphQL {
     fn from(original: crate::types::ProtocolFeeParameters) -> Self {
         Self {
-            fee_bps: original.fee_bps.map(|v| v as i32),
-            protocol_vault: original
-                .protocol_vault
-                .map(carbon_core::graphql::primitives::Pubkey),
+            protocol_vault: carbon_core::graphql::primitives::Pubkey(original.protocol_vault),
         }
     }
 }

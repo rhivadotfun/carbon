@@ -3,7 +3,7 @@ use carbon_core::{
     account::AccountMetadata,
     postgres::{
         metadata::AccountRowMetadata,
-        primitives::{Pubkey, U16, U8},
+        primitives::{Pubkey, U8},
     },
 };
 
@@ -12,8 +12,6 @@ pub struct ProtocolFeeRow {
     #[sqlx(flatten)]
     pub account_metadata: AccountRowMetadata,
     pub bump: U8,
-    pub padding: Vec<u8>,
-    pub fee_bps: U16,
     pub protocol_vault: Pubkey,
 }
 
@@ -25,8 +23,6 @@ impl ProtocolFeeRow {
         Self {
             account_metadata: metadata.into(),
             bump: source.bump.into(),
-            padding: source.padding.to_vec(),
-            fee_bps: source.fee_bps.into(),
             protocol_vault: source.protocol_vault.into(),
         }
     }
@@ -37,17 +33,6 @@ impl TryFrom<ProtocolFeeRow> for crate::accounts::protocol_fee::ProtocolFee {
     fn try_from(source: ProtocolFeeRow) -> Result<Self, Self::Error> {
         Ok(Self {
             bump: source.bump.try_into().map_err(|_| {
-                carbon_core::error::Error::Custom(
-                    "Failed to convert value from postgres primitive".to_string(),
-                )
-            })?,
-            padding: source.padding.as_slice().try_into().map_err(|_| {
-                carbon_core::error::Error::Custom(
-                    "Failed to convert padding from postgres primitive: expected 7 bytes"
-                        .to_string(),
-                )
-            })?,
-            fee_bps: source.fee_bps.try_into().map_err(|_| {
                 carbon_core::error::Error::Custom(
                     "Failed to convert value from postgres primitive".to_string(),
                 )
@@ -63,14 +48,7 @@ impl carbon_core::postgres::operations::Table for crate::accounts::protocol_fee:
     }
 
     fn columns() -> Vec<&'static str> {
-        vec![
-            "__pubkey",
-            "__slot",
-            "bump",
-            "padding",
-            "fee_bps",
-            "protocol_vault",
-        ]
+        vec!["__pubkey", "__slot", "bump", "protocol_vault"]
     }
 }
 
@@ -81,17 +59,13 @@ impl carbon_core::postgres::operations::Insert for ProtocolFeeRow {
             r#"
             INSERT INTO zap_protocol_fee_account (
                 "bump",
-                "padding",
-                "fee_bps",
                 "protocol_vault",
                 __pubkey, __slot
             ) VALUES (
-                $1, $2, $3, $4, $5, $6
+                $1, $2, $3, $4
             )"#,
         )
         .bind(self.bump)
-        .bind(&self.padding)
-        .bind(self.fee_bps)
         .bind(self.protocol_vault)
         .bind(self.account_metadata.pubkey)
         .bind(&self.account_metadata.slot)
@@ -108,25 +82,19 @@ impl carbon_core::postgres::operations::Upsert for ProtocolFeeRow {
         sqlx::query(
             r#"INSERT INTO zap_protocol_fee_account (
                 "bump",
-                "padding",
-                "fee_bps",
                 "protocol_vault",
                 __pubkey, __slot
             ) VALUES (
-                $1, $2, $3, $4, $5, $6
+                $1, $2, $3, $4
             ) ON CONFLICT (
                 __pubkey
             ) DO UPDATE SET
                 "bump" = EXCLUDED."bump",
-                "padding" = EXCLUDED."padding",
-                "fee_bps" = EXCLUDED."fee_bps",
                 "protocol_vault" = EXCLUDED."protocol_vault",
                 __slot = EXCLUDED.__slot
             "#,
         )
         .bind(self.bump)
-        .bind(&self.padding)
-        .bind(self.fee_bps)
         .bind(self.protocol_vault)
         .bind(self.account_metadata.pubkey)
         .bind(&self.account_metadata.slot)
@@ -188,8 +156,6 @@ impl sqlx_migrator::Operation<sqlx::Postgres> for ProtocolFeeMigrationOperation 
             r#"CREATE TABLE IF NOT EXISTS zap_protocol_fee_account (
                 -- Account data
                 "bump" INT2 NOT NULL,
-                "padding" BYTEA NOT NULL,
-                "fee_bps" INT4 NOT NULL,
                 "protocol_vault" BYTEA NOT NULL,
                 -- Account metadata
                 __pubkey BYTEA NOT NULL,

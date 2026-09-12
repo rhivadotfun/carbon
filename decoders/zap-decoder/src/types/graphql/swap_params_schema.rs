@@ -9,6 +9,7 @@ use {
 pub struct SwapParamsGraphQL {
     pub data: Vec<U8>,
     pub fee_config: Option<FeeConfigGraphQL>,
+    pub protocol_fee: Option<i32>,
 }
 
 impl From<crate::types::SwapParams> for SwapParamsGraphQL {
@@ -20,6 +21,7 @@ impl From<crate::types::SwapParams> for SwapParamsGraphQL {
                 .map(carbon_core::graphql::primitives::U8)
                 .collect(),
             fee_config: original.fee_config.map(|v| v.into()),
+            protocol_fee: original.protocol_fee.map(|v| v as i32),
         }
     }
 }

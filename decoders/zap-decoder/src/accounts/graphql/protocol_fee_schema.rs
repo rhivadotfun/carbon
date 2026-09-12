@@ -9,8 +9,6 @@ use {
 pub struct ProtocolFeeGraphQL {
     pub account_metadata: crate::accounts::graphql::AccountMetadataGraphQL,
     pub bump: U8,
-    pub padding: Vec<U8>,
-    pub fee_bps: i32,
     pub protocol_vault: Pubkey,
 }
 
@@ -20,12 +18,6 @@ impl TryFrom<crate::accounts::postgres::ProtocolFeeRow> for ProtocolFeeGraphQL {
         Ok(Self {
             account_metadata: row.account_metadata.into(),
             bump: carbon_core::graphql::primitives::U8((*row.bump) as u8),
-            padding: row
-                .padding
-                .into_iter()
-                .map(carbon_core::graphql::primitives::U8)
-                .collect(),
-            fee_bps: *row.fee_bps,
             protocol_vault: carbon_core::graphql::primitives::Pubkey(row.protocol_vault.0),
         })
     }
