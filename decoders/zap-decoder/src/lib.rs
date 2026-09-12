@@ -2,7 +2,7 @@
 use solana_pubkey::Pubkey;
 pub struct ZapDecoder;
 pub const PROGRAM_ID: Pubkey =
-    solana_pubkey::Pubkey::from_str_const("RH1Kc6gvrQpruCzvw8z9k2U8tATRxkzHTej3jb9nmdA");
+    solana_pubkey::Pubkey::from_str_const("RH1NLqLxRAUxTq3L1SBS1ED78o1fHxQqRwnBQYVsYub");
 
 pub mod accounts;
 pub mod events;
