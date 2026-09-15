@@ -256,14 +256,15 @@ impl Datasource for YellowstoneGrpcGeyserClient {
         let account_deletions_tracked = self.account_deletions_tracked.clone();
         let retain_block_failed_transactions =
             self.retain_block_failed_transactions.unwrap_or(true);
+        let geyser_config = self.geyser_config.clone();
+        let initial_subscribe_request = self.initial_subscribe_request.clone();
 
-        let builder = GeyserGrpcClient::build_from_shared(endpoint)
+        let builder = GeyserGrpcClient::build_from_shared(endpoint.clone())
             .map_err(|err| carbon_core::error::Error::FailedToConsumeDatasource(err.to_string()))?
-            .x_token(x_token)
+            .x_token(x_token.clone())
             .map_err(|err| carbon_core::error::Error::FailedToConsumeDatasource(err.to_string()))?;
 
-        let mut geyser_client = self
-            .geyser_config
+        let mut geyser_client = geyser_config
             .geyser_config_builder(builder)
             .map_err(|err| carbon_core::error::Error::FailedToConsumeDatasource(err.to_string()))?
             .connect()
@@ -288,203 +289,291 @@ impl Datasource for YellowstoneGrpcGeyserClient {
         tokio::spawn(async move {
             let mut reconnect_receiver = reconnect_receiver;
 
+            let mut latest_subscribe_request = initial_subscribe_request;
             let mut last_disconnect_time: Option<DateTime<Utc>> = None;
             let mut last_slot_before_disconnect: Option<u64> = None;
             let mut last_processed_slot: u64 = 0;
+            let mut reconnect_attempts: u64 = 0;
 
             loop {
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                if cancellation_token.is_cancelled() {
+                    log::info!("Cancelling Yellowstone gRPC subscription.");
+                    break;
+                }
+
+                if reconnect_attempts > 0 {
+                    if last_disconnect_time.is_none() {
+                        last_disconnect_time = Some(Utc::now());
+                        last_slot_before_disconnect = Some(last_processed_slot);
+                    }
+
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => {
+                            log::info!("Cancelling Yellowstone gRPC subscription during reconnection delay.");
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+
+                    if cancellation_token.is_cancelled() {
                         log::info!("Cancelling Yellowstone gRPC subscription.");
                         break;
                     }
-                    request = reconnect_receiver.recv() => {
-                        match request {
-                            None => {}
-                            Some(new_request) => {
-                                let subscribe_request = drain_latest_with(&mut reconnect_receiver, new_request);
 
-                                match geyser_client.subscribe_with_request(Some(subscribe_request.clone())).await {
-                                        Ok((mut subscribe_tx, mut stream)) => {
-                                            let mut first_message_after_reconnect = last_disconnect_time.is_some();
+                    log::info!("Attempting reconnection attempt {reconnect_attempts}...");
 
-                                            loop {
-                                                if cancellation_token.is_cancelled() {
-                                                    break;
+                    let builder_res = GeyserGrpcClient::build_from_shared(endpoint.clone())
+                        .and_then(|builder| builder.x_token(x_token.clone()));
+
+                    match builder_res {
+                        Ok(builder) => match geyser_config.geyser_config_builder(builder) {
+                            Ok(configured_builder) => {
+                                match configured_builder.connect().await {
+                                    Ok(client) => {
+                                        geyser_client = client;
+                                    }
+                                    Err(error) => {
+                                        log::error!("Failed to reconnect Yellowstone gRPC client: {error:?}");
+                                        reconnect_attempts += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                log::error!(
+                                    "Failed to build Yellowstone gRPC client config: {error:?}"
+                                );
+                                reconnect_attempts += 1;
+                                continue;
+                            }
+                        },
+                        Err(error) => {
+                            log::error!("Failed to build Yellowstone gRPC builder: {error:?}");
+                            reconnect_attempts += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                if let Ok(new_request) = reconnect_receiver.try_recv() {
+                    latest_subscribe_request =
+                        drain_latest_with(&mut reconnect_receiver, new_request);
+                }
+
+                let mut subscribe_request = latest_subscribe_request.clone();
+                if last_processed_slot > 0 {
+                    subscribe_request.from_slot = Some(last_processed_slot);
+                }
+
+                match geyser_client
+                    .subscribe_with_request(Some(subscribe_request.clone()))
+                    .await
+                {
+                    Ok((mut subscribe_tx, mut stream)) => {
+                        reconnect_attempts = 0;
+                        let mut first_message_after_reconnect = last_disconnect_time.is_some();
+
+                        loop {
+                            tokio::select! {
+                                _ = cancellation_token.cancelled() => {
+                                    log::info!("Cancelling Yellowstone gRPC subscription.");
+                                    return;
+                                }
+                                request = reconnect_receiver.recv() => {
+                                    match request {
+                                        Some(new_request) => {
+                                            latest_subscribe_request = drain_latest_with(&mut reconnect_receiver, new_request);
+                                            let mut updated_subscribe_request = latest_subscribe_request.clone();
+                                            if last_processed_slot > 0 {
+                                                updated_subscribe_request.from_slot = Some(last_processed_slot);
+                                            }
+                                            if let Err(error) = subscribe_tx.send(updated_subscribe_request).await {
+                                                log::error!("Failed to send updated subscription request: {error:?}");
+                                                if last_disconnect_time.is_none() {
+                                                    last_disconnect_time = Some(Utc::now());
+                                                    last_slot_before_disconnect = Some(last_processed_slot);
                                                 }
+                                                reconnect_attempts += 1;
+                                                break;
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                message_result = tokio::time::timeout(stream_timeout, stream.next()) => {
+                                    let message = match message_result {
+                                        Ok(Some(msg)) => msg,
+                                        Ok(None) => {
+                                            log::warn!("Stream closed");
+                                            if last_disconnect_time.is_none() {
+                                                last_disconnect_time = Some(Utc::now());
+                                                last_slot_before_disconnect = Some(last_processed_slot);
+                                                log::warn!("Disconnected at slot {last_processed_slot}");
+                                            }
+                                            reconnect_attempts += 1;
+                                            break;
+                                        }
+                                        Err(_) => {
+                                            log::warn!("Stream timeout - no messages for {stream_timeout:?}");
+                                            if last_disconnect_time.is_none() {
+                                                last_disconnect_time = Some(Utc::now());
+                                                last_slot_before_disconnect = Some(last_processed_slot);
+                                                log::warn!("Disconnected at slot {last_processed_slot} (timeout)");
+                                            }
+                                            reconnect_attempts += 1;
+                                            break;
+                                        }
+                                    };
 
-                                                let message_result = tokio::time::timeout(
-                                                    stream_timeout,
-                                                    stream.next()
-                                                ).await;
+                                    match message {
+                                        Ok(msg) => {
+                                            let mut updates: Vec<Update> = vec![];
 
-                                                let message = match message_result {
-                                                    Ok(Some(msg)) => msg,
-                                                    Ok(None) => {
-                                                        log::warn!("Stream closed");
-                                                        if last_disconnect_time.is_none() {
-                                                            last_disconnect_time = Some(Utc::now());
-                                                            last_slot_before_disconnect = Some(last_processed_slot);
-                                                            log::warn!("Disconnected at slot {last_processed_slot}");
-                                                        }
-                                                        break;
-                                                    }
-                                                    Err(_) => {
-                                                        log::warn!("Stream timeout - no messages for {stream_timeout:?}");
-                                                        if last_disconnect_time.is_none() {
-                                                            last_disconnect_time = Some(Utc::now());
-                                                            last_slot_before_disconnect = Some(last_processed_slot);
-                                                            log::warn!("Disconnected at slot {last_processed_slot} (timeout)");
-                                                        }
-                                                        break;
-                                                    }
+                                            if first_message_after_reconnect {
+                                                let current_slot = match &msg.update_oneof {
+                                                    Some(UpdateOneof::Account(ref update)) => Some(update.slot),
+                                                    Some(UpdateOneof::Transaction(ref update)) => Some(update.slot),
+                                                    Some(UpdateOneof::Block(ref update)) => Some(update.slot),
+                                                    _ => None,
                                                 };
 
-                                                match message {
-                                                    Ok(msg) => {
-                                                        let mut updates: Vec<Update> = vec![];
+                                                if let Some(slot) = current_slot {
+                                                    first_message_after_reconnect = false;
 
-                                                        if first_message_after_reconnect {
-                                                            let current_slot = match &msg.update_oneof {
-                                                                Some(UpdateOneof::Account(ref update)) => Some(update.slot),
-                                                                Some(UpdateOneof::Transaction(ref update)) => Some(update.slot),
-                                                                Some(UpdateOneof::Block(ref update)) => Some(update.slot),
-                                                                _ => None,
-                                                            };
+                                                    if let (Some(disconnect_time), Some(last_slot)) =
+                                                        (last_disconnect_time.take(), last_slot_before_disconnect.take())
+                                                    {
+                                                        let missed = slot.saturating_sub(last_slot);
 
-                                                            if let Some(slot) = current_slot {
-                                                                first_message_after_reconnect = false;
+                                                        let disconnection = DatasourceDisconnection {
+                                                            source: "yellowstone-grpc".to_string(),
+                                                            disconnect_time,
+                                                            last_slot_before_disconnect: last_slot,
+                                                            first_slot_after_reconnect: slot,
+                                                            missed_slots: missed,
+                                                        };
 
-                                                                if let (Some(disconnect_time), Some(last_slot)) =
-                                                                    (last_disconnect_time.take(), last_slot_before_disconnect.take())
-                                                                {
-                                                                    let missed = slot.saturating_sub(last_slot);
-
-                                                                    let disconnection = DatasourceDisconnection {
-                                                                        source: "yellowstone-grpc".to_string(),
-                                                                        disconnect_time,
-                                                                        last_slot_before_disconnect: last_slot,
-                                                                        first_slot_after_reconnect: slot,
-                                                                        missed_slots: missed,
-                                                                    };
-
-                                                                    if let Some(tx) = &disconnect_tx_clone {
-                                                                        let _ = tx.try_send(disconnection);
-                                                                    }
-
-                                                                    log::info!("Reconnected. Slots: {last_slot} -> {slot} (missed: {missed})");
-                                                                }
-                                                            }
+                                                        if let Some(disconnect_notifier) = &disconnect_tx_clone {
+                                                            let _ = disconnect_notifier.try_send(disconnection);
                                                         }
 
-                                                        match msg.update_oneof {
-                                                            Some(UpdateOneof::Account(account_update)) => {
-                                                                last_processed_slot = account_update.slot;
-                                                                collect_subscribe_account_update_info(
-                                                                    account_update.account,
-                                                                    account_update.slot,
-                                                                    &mut updates,
-                                                                    &account_deletions_tracked,
-                                                                ).await
-                                                            }
-
-                                                            Some(UpdateOneof::Transaction(transaction_update)) => {
-                                                                last_processed_slot = transaction_update.slot;
-                                                                collect_subscribe_update_transaction_info(
-                                                                    transaction_update.transaction,
-                                                                    transaction_update.slot,
-                                                                    None,
-                                                                    &mut updates,
-                                                                )
-                                                            }
-                                                            Some(UpdateOneof::Block(block_update)) => {
-                                                                last_processed_slot = block_update.slot;
-                                                                let block_time = block_update.block_time.map(|ts| ts.timestamp);
-
-                                                                for transaction_update in block_update.transactions {
-                                                                    if retain_block_failed_transactions || transaction_update.meta.as_ref().map(|meta| meta.err.is_none()).unwrap_or(false) {
-                                                                        collect_subscribe_update_transaction_info(
-                                                                            Some(transaction_update),
-                                                                            block_update.slot,
-                                                                            block_time,
-                                                                            &mut updates,
-                                                                        )
-                                                                    }
-                                                                }
-
-                                                                for account_info in block_update.accounts {
-                                                                    collect_subscribe_account_update_info(
-                                                                        Some(account_info),
-                                                                        block_update.slot,
-                                                                        &mut updates,
-                                                                        &account_deletions_tracked,
-                                                                    ).await
-                                                                }
-                                                            }
-
-                                                            Some(UpdateOneof::Ping(_)) => {
-                                                                match subscribe_tx
-                                                                    .send(SubscribeRequest {
-                                                                        ping: Some(SubscribeRequestPing { id: 1 }),
-                                                                        ..Default::default()
-                                                                    })
-                                                                    .await {
-                                                                        Ok(()) => (),
-                                                                        Err(error) => {
-                                                                            log::error!("Failed to send ping error: {error:?}");
-                                                                            break;
-                                                                        },
-                                                                    }
-                                                            }
-
-                                                            _ => {}
-                                                        }
-
-                                                       if !updates.is_empty() {
-                                                           #[cfg(feature = "batch")]
-                                                           match sender.try_send(((BatchUpdateId::new_unique(), updates), id.clone())) {
-                                                               Ok(()) => {},
-                                                               Err(error) => {
-                                                                   log::error!("Failed to send update slot {last_processed_slot}: {error:?}");
-                                                               },
-                                                           }
-
-                                                           #[cfg(not(feature =  "batch"))]
-                                                           for update in updates {
-                                                               match sender.try_send((update, id.clone())) {
-                                                                   Ok(()) => {},
-                                                                   Err(error) => {
-                                                                       log::error!("Failed to send update slot {last_processed_slot}: {error:?}");
-                                                                   },
-                                                               }
-                                                           }
-                                                       }
+                                                        log::info!("Reconnected. Slots: {last_slot} -> {slot} (missed: {missed})");
                                                     }
-                                                    Err(error) => {
-                                                        log::error!("Geyser stream error: {error:?}");
+                                                }
+                                            }
 
-                                                        if last_disconnect_time.is_none() {
-                                                            last_disconnect_time = Some(Utc::now());
-                                                            last_slot_before_disconnect = Some(last_processed_slot);
-                                                            log::error!("Disconnected at slot {last_processed_slot}");
+                                            match msg.update_oneof {
+                                                Some(UpdateOneof::Account(account_update)) => {
+                                                    last_processed_slot = account_update.slot;
+                                                    collect_subscribe_account_update_info(
+                                                        account_update.account,
+                                                        account_update.slot,
+                                                        &mut updates,
+                                                        &account_deletions_tracked,
+                                                    ).await
+                                                }
+
+                                                Some(UpdateOneof::Transaction(transaction_update)) => {
+                                                    last_processed_slot = transaction_update.slot;
+                                                    collect_subscribe_update_transaction_info(
+                                                        transaction_update.transaction,
+                                                        transaction_update.slot,
+                                                        None,
+                                                        &mut updates,
+                                                    )
+                                                }
+                                                Some(UpdateOneof::Block(block_update)) => {
+                                                    last_processed_slot = block_update.slot;
+                                                    let block_time = block_update.block_time.map(|ts| ts.timestamp);
+
+                                                    for transaction_update in block_update.transactions {
+                                                        if retain_block_failed_transactions || transaction_update.meta.as_ref().map(|meta| meta.err.is_none()).unwrap_or(false) {
+                                                            collect_subscribe_update_transaction_info(
+                                                                Some(transaction_update),
+                                                                block_update.slot,
+                                                                block_time,
+                                                                &mut updates,
+                                                            )
                                                         }
+                                                    }
 
-                                                        break;
+                                                    for account_info in block_update.accounts {
+                                                        collect_subscribe_account_update_info(
+                                                            Some(account_info),
+                                                            block_update.slot,
+                                                            &mut updates,
+                                                            &account_deletions_tracked,
+                                                        ).await
+                                                    }
+                                                }
+
+                                                Some(UpdateOneof::Ping(_)) => {
+                                                    match subscribe_tx
+                                                        .send(SubscribeRequest {
+                                                            ping: Some(SubscribeRequestPing { id: 1 }),
+                                                            ..Default::default()
+                                                        })
+                                                        .await {
+                                                            Ok(()) => (),
+                                                            Err(error) => {
+                                                                log::error!("Failed to send ping error: {error:?}");
+                                                                if last_disconnect_time.is_none() {
+                                                                    last_disconnect_time = Some(Utc::now());
+                                                                    last_slot_before_disconnect = Some(last_processed_slot);
+                                                                }
+                                                                reconnect_attempts += 1;
+                                                                break;
+                                                            },
+                                                        }
+                                                }
+
+                                                _ => {}
+                                            }
+
+                                            if !updates.is_empty() {
+                                                #[cfg(feature = "batch")]
+                                                match sender.try_send(((BatchUpdateId::new_unique(), updates), id.clone())) {
+                                                    Ok(()) => {},
+                                                    Err(error) => {
+                                                        log::error!("Failed to send update slot {last_processed_slot}: {error:?}");
+                                                    },
+                                                }
+
+                                                #[cfg(not(feature =  "batch"))]
+                                                for update in updates {
+                                                    match sender.try_send((update, id.clone())) {
+                                                        Ok(()) => {},
+                                                        Err(error) => {
+                                                            log::error!("Failed to send update slot {last_processed_slot}: {error:?}");
+                                                        },
                                                     }
                                                 }
                                             }
                                         }
-                                        Err(e) => {
-                                            log::error!("Failed to subscribe: {e:?}");
+                                        Err(error) => {
+                                            log::error!("Geyser stream error: {error:?}");
 
                                             if last_disconnect_time.is_none() {
                                                 last_disconnect_time = Some(Utc::now());
                                                 last_slot_before_disconnect = Some(last_processed_slot);
+                                                log::error!("Disconnected at slot {last_processed_slot}");
                                             }
+                                            reconnect_attempts += 1;
+                                            break;
                                         }
+                                    }
                                 }
                             }
                         }
+                    }
+                    Err(error) => {
+                        log::error!("Failed to subscribe: {error:?}");
+
+                        if last_disconnect_time.is_none() {
+                            last_disconnect_time = Some(Utc::now());
+                            last_slot_before_disconnect = Some(last_processed_slot);
+                        }
+                        reconnect_attempts += 1;
                     }
                 }
             }

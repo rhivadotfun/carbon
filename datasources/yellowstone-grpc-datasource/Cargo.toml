@@ -16,20 +16,20 @@ crate-type = ["rlib"]
 batch = ["carbon-core/batch"]
 
 [dependencies]
-yellowstone-grpc-convert = { path = "../../crates/yellowstone-grpc-convert" }
+
+async-trait = { workspace = true }
+
+carbon-core = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+log = { workspace = true }
 
 solana-account = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signature = { workspace = true }
 solana-system-interface = { workspace = true }
-
-carbon-core = { workspace = true }
-
-async-trait = { workspace = true }
-chrono = { workspace = true }
-futures = { workspace = true }
-log = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 yellowstone-grpc-client = { workspace = true }
+yellowstone-grpc-convert = { path = "../../crates/yellowstone-grpc-convert" }
 yellowstone-grpc-proto = { workspace = true }
