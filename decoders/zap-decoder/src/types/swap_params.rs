@@ -4,6 +4,7 @@ use crate::types::FeeConfig;
 #[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize, PartialEq)]
 pub struct SwapParams {
     pub data: Vec<u8>,
+    pub amount: u64,
     pub fee_config: Option<FeeConfig>,
     pub protocol_fee: Option<u16>,
 }
